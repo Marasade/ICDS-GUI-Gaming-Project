@@ -33,3 +33,16 @@ class Client:
         self.gui.run()
         print("gui is off")
         self.quit()
+if __name__ == "__main__":
+    import argparse
+    
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description='Chat Client with GUI')
+    parser.add_argument('-d', 
+                       help='destination server address',
+                       default=None)
+    args = parser.parse_args()
+    
+    # 创建并运行客户端
+    client = Client(args)
+    client.run_chat()
