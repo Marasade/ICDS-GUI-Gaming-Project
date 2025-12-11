@@ -127,6 +127,10 @@ class Server:
             elif msg["action"] == "submit_score":
                 self.handle_submit_score(from_sock, msg)
                 return
+            # 请求排行榜
+            elif msg["action"] == "request_leaderboard":
+                self.send_leaderboard(from_sock)
+                return
             
             elif msg["action"] == "connect":
                 to_name = msg["target"]
@@ -359,21 +363,25 @@ class Server:
         if sock2 in self.active_games: del self.active_games[sock2]
 
     def handle_submit_score(self, client_socket, data):
-        ##处理分数提交"""
-        player = data.get("player")
+        """處理分數提交"""
+        player_name = self.logged_sock2name.get(client_socket)
         score = data.get("score")
         
-        # 更新排行榜
-        if player in self.leaderboard:
-            self.leaderboard[player] += score
+        if not player_name or score is None:
+            return
+            
+        # 更新排行榜 (累加分數)
+        if player_name in self.leaderboard:
+            self.leaderboard[player_name] += score
         else:
-            self.leaderboard[player] = score
-        
-        # 广播更新的排行榜
+            self.leaderboard[player_name] = score
+            
+        # 廣播給所有人
         self.broadcast_leaderboard()
 
-    def broadcast_leaderboard(self):
-        ###广播排行榜
+        
+
+    def send_leaderboard(self, client_socket):
         sorted_scores = sorted(
             self.leaderboard.items(),
             key=lambda x: x[1],
@@ -386,15 +394,47 @@ class Server:
         ]
         
         msg = json.dumps({
-            "action": "leaderboard_update",
+            "game_action": "leaderboard_update",
             "data": leaderboard_data
         })
         
+        try:
+            mysend(client_socket, msg)
+            print(f"[LEADERBOARD] Sent to {self.logged_sock2name.get(client_socket)}")
+        except:
+            print(f"[LEADERBOARD] Failed to send")
+
+    def broadcast_leaderboard(self):
+        """廣播排行榜給所有在線用戶"""
+        # 1. 排序：分數高的在前
+        sorted_scores = sorted(
+            self.leaderboard.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )[:10] # 只取前10名
+        
+        # 2. 構建數據列表
+        leaderboard_data = [
+            {"player": name, "score": score}
+            for name, score in sorted_scores
+        ]
+        
+        # 3. 發送消息
+        # 【重要】這裡使用 "game_action"，這樣 Client 的攔截器能安全處理
+        msg = json.dumps({
+            "game_action": "leaderboard_update",
+            "data": leaderboard_data
+        })
+        
+        # 給所有登錄的用戶發送
         for sock in self.logged_sock2name.keys():
             try:
                 mysend(sock, msg)
             except:
                 pass
+
+
+    
 
 
 

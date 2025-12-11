@@ -34,6 +34,9 @@ class GUI:
         self.game_board = None    # 游戏棋盘
         self.my_symbol = None     # 我的符号 (X 或 O)
         self.is_my_turn = False   # 是否轮到我
+        self.leaderboard_window = None
+        self.leaderboard_data = []
+        self.my_score = 0
 
     def login(self):
         # login window
@@ -101,6 +104,9 @@ class GUI:
                 self.textCons.insert(END, menu +"\n\n")      
                 self.textCons.config(state = DISABLED)
                 self.textCons.see(END)
+
+
+
                 # while True:
                 #     self.proc()
         # the thread to receive messages
@@ -209,6 +215,103 @@ class GUI:
             self.turn_info.config(text="Your turn!", fg="#27ae60")
         else:
             self.turn_info.config(text="Opponent's turn...", fg="#e74c3c")
+
+
+    def request_leaderboard(self):
+        """请求服务器发送排行榜"""
+        msg = json.dumps({"action": "request_leaderboard"})
+        self.send(msg)
+    
+    def update_leaderboard_display(self, leaderboard_data):
+        """更新排行榜显示"""
+        if not self.game_window or not hasattr(self, 'leaderboard_text'):
+            return
+        
+        self.leaderboard_text.config(state=NORMAL)
+        self.leaderboard_text.delete(1.0, END)
+        
+        if not leaderboard_data:
+            self.leaderboard_text.insert(END, "No scores yet!\n")
+        else:
+            for i, entry in enumerate(leaderboard_data, 1):
+                player = entry["player"]
+                score = entry["score"]
+                
+                # 高亮当前玩家
+                if player == self.sm.get_myname():
+                    line = f"{i}. {player}: {score} ⭐\n"
+                else:
+                    line = f"{i}. {player}: {score}\n"
+                
+                self.leaderboard_text.insert(END, line)
+        
+        self.leaderboard_text.config(state=DISABLED)
+    
+    def update_my_score(self, new_score):
+        """更新我的分数显示"""
+        self.my_score = new_score
+        if hasattr(self, 'score_label'):
+            self.score_label.config(text=f"Your Score: {self.my_score}")
+    
+    def show_leaderboard(self):
+        """显示独立的排行榜窗口"""
+        if self.leaderboard_window:
+            self.leaderboard_window.lift()
+            return
+        
+        self.leaderboard_window = Toplevel(self.Window)
+        self.leaderboard_window.title("Leaderboard")
+        self.leaderboard_window.geometry("300x400")
+        self.leaderboard_window.resizable(False, False)
+        
+        # 标题
+        title = Label(self.leaderboard_window,
+                     text="🏆 Top Players",
+                     font="Helvetica 16 bold",
+                     bg="#2c3e50",
+                     fg="#ecf0f1")
+        title.pack(fill=X, pady=10)
+        
+        # 排行榜显示
+        lb_text = Text(self.leaderboard_window,
+                       font="Helvetica 12",
+                       bg="#ecf0f1",
+                       state=DISABLED)
+        lb_text.pack(fill=BOTH, expand=True, padx=10, pady=10)
+        
+        # 请求并显示排行榜
+        self.request_leaderboard()
+        
+        # 更新显示
+        if self.leaderboard_data:
+            lb_text.config(state=NORMAL)
+            for i, entry in enumerate(self.leaderboard_data, 1):
+                player = entry["player"]
+                score = entry["score"]
+                
+                if player == self.sm.get_myname():
+                    line = f"{i}. {player}: {score} ⭐\n"
+                else:
+                    line = f"{i}. {player}: {score}\n"
+                
+                lb_text.insert(END, line)
+            lb_text.config(state=DISABLED)
+        
+        # 关闭窗口
+        def on_close():
+            self.leaderboard_window.destroy()
+            self.leaderboard_window = None
+        
+        self.leaderboard_window.protocol("WM_DELETE_WINDOW", on_close)
+    
+    def submit_score(self, score_change):
+        """提交分数到服务器"""
+        msg = json.dumps({
+            "action": "submit_score",
+            "player": self.sm.get_myname(),
+            "score": score_change
+        })
+        self.send(msg)
     
     def close_game(self):
         """关闭游戏窗口"""
@@ -332,40 +435,62 @@ class GUI:
         self.entryMsg.delete(0, END)
 
     def proc(self):
-        # print(self.msg)
         while True:
-            read, write, error = select.select([self.socket], [], [], 0)
-            peer_msg = []
-            # print(self.msg)
-            if self.socket in read:
-                peer_msg = self.recv()
-            if len(self.my_msg) > 0 or len(peer_msg) > 0:
-                if len(peer_msg) > 0:
-                    try:
-                        msg_data = json.loads(peer_msg)
-                        
-                        # 处理游戏相关消息
-                        if "game_action" in msg_data:
-                            self.handle_game_message(msg_data)
-                            continue
-                    except json.JSONDecodeError:
-                        pass # 如果不是JSON，不管它
-                    except Exception as e:
-                        print(f"Error handling game msg: {e}")
+            try: # <--- 新增：最外层的 try，防止线程直接挂掉
+                read, write, error = select.select([self.socket], [], [], 0)
+                peer_msg = []
+                if self.socket in read:
+                    peer_msg = self.recv()
+                
+                if len(self.my_msg) > 0 or len(peer_msg) > 0:
+                    # 1. 尝试拦截游戏/排行榜消息
+                    if len(peer_msg) > 0:
+                        try:
+                            msg_data = json.loads(peer_msg)
+                            
+                            # 检查是否有 game_action
+                            if "game_action" in msg_data:
+                                self.handle_game_message(msg_data)
+                                continue # 处理完直接跳过，不给聊天系统
+                                
+                        except json.JSONDecodeError:
+                            pass # 不是 JSON，可能是普通聊天，放行
+                        except Exception as e:
+                            print(f"⚠️ 游戏逻辑出错: {e}") # 打印错误但不要崩潰
 
-                # print(self.system_msg)
-                self.system_msg += self.sm.proc(self.my_msg, peer_msg)
-                self.my_msg = ""
-                self.textCons.config(state = NORMAL)
-                self.textCons.insert(END, self.system_msg +"\n\n")      
-                self.textCons.config(state = DISABLED)
-                self.textCons.see(END)
-                self.system_msg = ""
+                    # 2. 正常的聊天/菜单消息处理
+                    # 如果上面 continue 了，这里就不会执行
+                    self.system_msg += self.sm.proc(self.my_msg, peer_msg)
+                    self.my_msg = ""
+                    
+                    # 更新 GUI 聊天框
+                    self.textCons.config(state = NORMAL)
+                    self.textCons.insert(END, self.system_msg + "\n\n")      
+                    self.textCons.config(state = DISABLED)
+                    self.textCons.see(END)
+                    self.system_msg = ""
 
+            except Exception as e:
+                # <--- 这里會告訴你為什麼黑屏
+                print(f"❌ proc 线程崩溃: {e}") 
+                import traceback
+                traceback.print_exc() # 打印详细报错位置
+                break # 避免死循环刷屏
 
+    def submit_score(self, score_change):
+    ###提交分数到服务器"""
+        msg = json.dumps({
+            "action": "submit_score",
+            "player": self.sm.get_myname(),
+            "score": score_change
+        })
+        self.send(msg)
     def handle_game_message(self, msg_data):
-        """处理服务器发来的游戏消息 (Client端逻辑)"""
-        action = msg_data["game_action"]
+        """处理服务器发来的游戏消息"""
+        action = msg_data.get("game_action")
+        
+        if not action:
+            return
 
         if action == "match_found":
             opponent = msg_data["opponent"]
@@ -396,25 +521,131 @@ class GUI:
         elif action == "game_over":
             result = msg_data["result"]
             winner = msg_data.get("winner")
-            
+
             message = ""
+            score_change = 0
+            
             if result == "tie":
                 message = "It's a tie! 🤝"
+                score_change = 1
             elif winner == self.my_symbol:
                 message = "You win! 🎉"
+                score_change = 3
             else:
                 message = "You lose! 😢"
+                score_change = 0
 
             if self.game_window:
                 self.turn_info.config(text=message, font="Helvetica 14 bold", fg="blue")
-                # 禁用所有按钮
                 for btn in self.board_buttons:
                     btn.config(state=DISABLED)
 
             self.game_active = False
             self.textCons.config(state=NORMAL)
-            self.textCons.insert(END, f"Game Over: {message}\n\n")
+            self.textCons.insert(END, f"Game Over: {message}\nYou earned {score_change} points!\n\n")
             self.textCons.config(state=DISABLED)
+
+            # 提交分数
+            self.submit_score(score_change)
+            
+        elif action == "leaderboard_update":
+            data = msg_data.get("data", [])
+
+            self.show_leaderboard_window(data)
+            
+            self.textCons.config(state=NORMAL)
+            self.textCons.insert(END, "📊 Leaderboard updated!\n\n")
+            self.textCons.config(state=DISABLED)
+            
+           
+            
+    def show_leaderboard_window(self, data):
+        """显示或更新排行榜窗口"""
+        
+        # 如果窗口已存在且打开，先关闭
+        if hasattr(self, 'lb_window') and self.lb_window and self.lb_window.winfo_exists():
+            self.lb_window.destroy()
+        
+        # 创建新窗口
+        self.lb_window = Toplevel(self.Window)
+        self.lb_window.title("🏆 Leaderboard")
+        self.lb_window.geometry("350x450")
+        self.lb_window.resizable(False, False)
+        self.lb_window.configure(bg="#2c3e50")
+        
+        # 标题
+        title_label = Label(
+            self.lb_window,
+            text="🏆 TOP PLAYERS 🏆",
+            font=("Helvetica", 16, "bold"),
+            bg="#2c3e50",
+            fg="#ecf0f1",
+            pady=15
+        )
+        title_label.pack(fill=X)
+        
+        # 使用 Text 显示排行榜（更简单）
+        lb_text = Text(
+            self.lb_window,
+            font=("Courier", 12),  # 等宽字体对齐更好
+            bg="#ecf0f1",
+            fg="#2c3e50",
+            state=NORMAL,
+            width=40,
+            height=20
+        )
+        lb_text.pack(pady=10, padx=10, fill=BOTH, expand=True)
+        
+        # 填入数据
+        if not data:
+            lb_text.insert(END, "\n  No scores yet!\n  Be the first to play!\n")
+        else:
+            # 表头
+            lb_text.insert(END, "  Rank  Player              Score\n")
+            lb_text.insert(END, "  " + "="*38 + "\n\n")
+            
+            # 显示排行榜
+            my_name = self.sm.get_myname()
+            for i, entry in enumerate(data, 1):
+                player = entry["player"]
+                score = entry["score"]
+                
+                # 高亮当前玩家
+                if player == my_name:
+                    line = f"  {i:>2}.  {player:<18} {score:>5} ⭐\n"
+                else:
+                    line = f"  {i:>2}.  {player:<18} {score:>5}\n"
+                
+                lb_text.insert(END, line)
+        
+        lb_text.config(state=DISABLED)
+        
+        # 关闭按钮
+        close_btn = Button(
+            self.lb_window,
+            text="Close",
+            font=("Helvetica", 11, "bold"),
+            bg="#e74c3c",
+            fg="white",
+            command=self.lb_window.destroy
+        )
+        close_btn.pack(pady=10)
+        
+        # 设置关闭事件
+        def on_close():
+            self.lb_window.destroy()
+            self.lb_window = None
+        
+        self.lb_window.protocol("WM_DELETE_WINDOW", on_close)
+    def request_and_show_leaderboard(self):
+        """请求服务器发送排行榜"""
+        msg = json.dumps({"action": "request_leaderboard"})
+        self.send(msg)
+        
+        # 在聊天框提示
+        self.textCons.config(state=NORMAL)
+        self.textCons.insert(END, "📊 Requesting leaderboard...\n\n")
+        self.textCons.config(state=DISABLED)
 
     def run(self):
         self.login()
