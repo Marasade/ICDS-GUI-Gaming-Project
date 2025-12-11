@@ -169,20 +169,27 @@ class GUI:
     
     def make_move(self, position):
         """玩家点击棋盘格子"""
+        # 1. 还没轮到自己，不能点
         if not self.is_my_turn:
             return
         
-        if self.game_board[position] != '':
-            return  # 格子已被占用
+        # 2. 【防止重复落子】直接检查按钮上有没有字
+        # 假设你的按钮列表叫 self.board_buttons (请核对你的变量名)
+        if self.board_buttons[position]['text'] != "":
+            return 
         
-        # 发送移动到服务器
+        # 3. 【关键修复】本地立刻显示自己的棋子，并锁住按钮
+        self.board_buttons[position].config(text=self.my_symbol, state=DISABLED)
+        
+        # 4. 发送移动到服务器
+        # 注意：这里要用 "game_move" 和 "move" 才能匹配我们之前改的 Server 代码
         msg = json.dumps({
-            "action": "game_move",
-            "position": position
+            "action": "game_move", 
+            "move": position
         })
         self.send(msg)
         
-        # 本地更新（等服务器确认）
+        # 5. 切换状态
         self.is_my_turn = False
         self.update_turn_display()
     
@@ -270,7 +277,7 @@ class GUI:
           
         # place the given widget
         # into the gui window
-        self.entryMsg.place(relwidth = 0.74,
+        self.entryMsg.place(relwidth = 0.50,
                             relheight = 0.06,
                             rely = 0.008,
                             relx = 0.011)
@@ -285,7 +292,7 @@ class GUI:
                                 bg = "#ABB2B9",
                                 command = lambda : self.sendButton(self.entryMsg.get()))
           
-        self.buttonMsg.place(relx = 0.77,
+        self.buttonMsg.place(relx = 0.52,
                              rely = 0.008,
                              relheight = 0.06, 
                              relwidth = 0.22)
@@ -298,8 +305,8 @@ class GUI:
                              bg = "#2ECC71",  # 绿色
                              command = self.startGameButton)
     
-        self.buttonGame.place(relx = 0.77,
-                            rely = 0.5,  # 放在 Send 按钮下方
+        self.buttonGame.place(relx = 0.75,
+                            rely = 0.008,  # 放在 Send 按钮右边
                             relheight = 0.06,
                             relwidth = 0.22)
           
@@ -340,9 +347,11 @@ class GUI:
                         # 处理游戏相关消息
                         if "game_action" in msg_data:
                             self.handle_game_message(msg_data)
-                            peer_msg = ""  # 已处理，清空
-                    except:
-                        pass 
+                            continue
+                    except json.JSONDecodeError:
+                        pass # 如果不是JSON，不管它
+                    except Exception as e:
+                        print(f"Error handling game msg: {e}")
 
                 # print(self.system_msg)
                 self.system_msg += self.sm.proc(self.my_msg, peer_msg)
@@ -352,52 +361,60 @@ class GUI:
                 self.textCons.config(state = DISABLED)
                 self.textCons.see(END)
                 self.system_msg = ""
+
+
     def handle_game_message(self, msg_data):
-    ##处理游戏消息
-        game_action = msg_data["game_action"]
-    
-        if game_action == "match_found":
-        # 找到对手
+        """处理服务器发来的游戏消息 (Client端逻辑)"""
+        action = msg_data["game_action"]
+
+        if action == "match_found":
             opponent = msg_data["opponent"]
             self.my_symbol = msg_data["your_symbol"]
-            self.is_my_turn = (self.my_symbol == "X")  # X 先走
-            
+            self.is_my_turn = (self.my_symbol == "X")
             self.game_active = True
+            
+            # 创建游戏窗口
             self.create_game_window()
             self.update_turn_display()
             
-            self.textCons.config(state = NORMAL)
+            # 在聊天框提示
+            self.textCons.config(state=NORMAL)
             self.textCons.insert(END, f"Match found! Playing against {opponent}\n\n")
-            self.textCons.config(state = DISABLED)
+            self.textCons.config(state=DISABLED)
+
+        elif action == "opponent_move":
+            move_index = msg_data["move"]
+            opponent_symbol = "O" if self.my_symbol == "X" else "X"
             
-        elif game_action == "board_update":
-            board_state = msg_data["board"]
-            current_turn = msg_data["current_turn"]
-            self.is_my_turn = (current_turn == self.my_symbol)
-                
-        if self.game_window:
-            self.update_board(board_state)
-            self.update_turn_display()
-        
-        elif game_action == "game_over":
-            # 游戏结束
-            result = msg_data["result"]
-            winner = msg_data.get("winner", None)
-            
+            # 更新棋盘按钮
             if self.game_window:
-                if winner == self.my_symbol:
-                    message = "You win! 🎉"
-                elif winner:
-                    message = "You lose! 😢"
-                else:
-                    message = "It's a tie! 🤝"
-                
-                self.turn_info.config(text=message, font="Helvetica 14 bold")
+                self.board_buttons[move_index].config(text=opponent_symbol, state=DISABLED)
             
+            self.is_my_turn = True
+            self.update_turn_display()
+
+        elif action == "game_over":
+            result = msg_data["result"]
+            winner = msg_data.get("winner")
+            
+            message = ""
+            if result == "tie":
+                message = "It's a tie! 🤝"
+            elif winner == self.my_symbol:
+                message = "You win! 🎉"
+            else:
+                message = "You lose! 😢"
+
+            if self.game_window:
+                self.turn_info.config(text=message, font="Helvetica 14 bold", fg="blue")
+                # 禁用所有按钮
+                for btn in self.board_buttons:
+                    btn.config(state=DISABLED)
+
             self.game_active = False
-            self.textCons.config(state = NORMAL)
+            self.textCons.config(state=NORMAL)
             self.textCons.insert(END, f"Game Over: {message}\n\n")
-            self.textCons.config(state = DISABLED)
+            self.textCons.config(state=DISABLED)
 
     def run(self):
         self.login()

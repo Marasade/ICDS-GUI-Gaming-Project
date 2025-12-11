@@ -1,7 +1,7 @@
 """
 Created on Tue Jul 22 00:47:05 2014
 
-@author: alina, zzhang
+@author: selina,Yirui
 """
 
 import time
@@ -35,6 +35,8 @@ class Server:
         self.waiting_players = []  # 等待匹配的玩家列表
         self.active_games = {}     # {player_socket: game_info}
         self.leaderboard = {}      # {player_name: score}
+        self.boards = {}         # 记录每个玩家对应的棋盘列表
+        self.player_symbols = {} # 记录每个玩家是 X 还是 O
 
 
         # sonnet
@@ -102,13 +104,18 @@ class Server:
         #read msg code
         msg = myrecv(from_sock)
         if len(msg) > 0:
+            try:
+                msg = json.loads(msg)
+                print(f"[SERVER] Received: {msg.get('action')}")  # 调试
+            except:
+                print("[SERVER] Failed to parse JSON")
+                return
 #==============================================================================
 # handle connect request
 #==============================================================================
-            msg = json.loads(msg)
-                  # 游戏匹配请求
+              # 游戏匹配请求
             if msg["action"] == "find_match":
-                self.handle_find_match(from_sock)
+                self.handle_find_match(from_sock,msg)
                 return
             
             # 游戏移动
@@ -120,6 +127,7 @@ class Server:
             elif msg["action"] == "submit_score":
                 self.handle_submit_score(from_sock, msg)
                 return
+            
             elif msg["action"] == "connect":
                 to_name = msg["target"]
                 from_name = self.logged_sock2name[from_sock]
@@ -238,11 +246,18 @@ class Server:
         if self.waiting_players:
             opponent_socket = self.waiting_players.pop(0)
             opponent_name = self.logged_sock2name[opponent_socket]
+            shared_board = [""] * 9 
+            self.boards[client_socket] = shared_board
+            self.boards[opponent_socket] = shared_board
+            
+            # 记录符号
+            self.player_symbols[opponent_socket] = "X" # 先来的是 X
+            self.player_symbols[client_socket] = "O"   # 后来的是 O
             
             # 通知两个玩家匹配成功
             # 第一个玩家是 X
             msg1 = json.dumps({
-                "action": "match_found",
+                "game_action": "match_found",
                 "opponent": player_name,
                 "your_symbol": "X"
             })
@@ -250,7 +265,7 @@ class Server:
             
             # 第二个玩家是 O
             msg2 = json.dumps({
-                "action": "match_found",
+                "game_action": "match_found",
                 "opponent": opponent_name,
                 "your_symbol": "O"
             })
@@ -264,22 +279,87 @@ class Server:
             self.waiting_players.append(client_socket)
 
     def handle_game_move(self, client_socket, data):
-        """处理游戏移动"""
         if client_socket not in self.active_games:
             return
-        
+    
         opponent_socket = self.active_games[client_socket]
         move = data.get("move")
+    
+        if move is None:
+            return
         
-        # 转发移动给对手
-        msg = json.dumps({
-            "action": "opponent_move",
-            "move": move
-        })
-        mysend(opponent_socket, msg)
+        # 1. 更新服务器端的棋盘记录
+        if client_socket in self.boards:
+            board = self.boards[client_socket]
+            symbol = self.player_symbols[client_socket]
+            
+            # 检查位置是否已被占用
+            if board[move] != "":
+                return
+                
+            board[move] = symbol  # 在棋盘上记录这一步
+            
+            # 2. 检查胜负
+            winner = self.check_winner(board)
+            if winner:
+                # 发送游戏结束消息
+                msg = json.dumps({
+                    "game_action": "game_over",
+                    "result": "win",
+                    "winner": winner
+                })
+                mysend(client_socket, msg)
+                mysend(opponent_socket, msg)
+                self.cleanup_game(client_socket, opponent_socket)
+                return
+
+            # 3. 检查平局 (棋盘满了但没人赢)
+            if "" not in board:
+                msg = json.dumps({
+                    "game_action": "game_over",
+                    "result": "tie",
+                    "winner": None
+                })
+                mysend(client_socket, msg)
+                mysend(opponent_socket, msg)
+                self.cleanup_game(client_socket, opponent_socket)
+                return
+
+            # 4. 如果没结束，正常转发给对手
+            msg = json.dumps({
+                "game_action": "opponent_move",
+                "move": move
+            })
+            mysend(opponent_socket, msg)
+
+    # === 新增：辅助函数 ===
+    def check_winner(self, board):
+        ##检查是否有赢家"""
+        # 所有赢的组合
+        winning_combos = [
+            (0, 1, 2), (3, 4, 5), (6, 7, 8), # 行
+            (0, 3, 6), (1, 4, 7), (2, 5, 8), # 列
+            (0, 4, 8), (2, 4, 6)             # 对角线
+        ]
+        for a, b, c in winning_combos:
+            if board[a] and board[a] == board[b] == board[c]:
+                return board[a] # 返回 "X" 或 "O"
+        return None
+
+    def cleanup_game(self, sock1, sock2):
+        ##游戏结束后清理内存"""
+        # 删除棋盘记录
+        if sock1 in self.boards: del self.boards[sock1]
+        if sock2 in self.boards: del self.boards[sock2]
+        # 删除符号记录
+        if sock1 in self.player_symbols: del self.player_symbols[sock1]
+        if sock2 in self.player_symbols: del self.player_symbols[sock2]
+        # 删除对战关系
+        if sock1 in self.active_games: del self.active_games[sock1]
+        if sock2 in self.active_games: del self.active_games[sock2]
 
     def handle_submit_score(self, client_socket, data):
-        """处理分数提交"""
+        ##处理分数提交"""
         player = data.get("player")
         score = data.get("score")
         
@@ -293,7 +373,7 @@ class Server:
         self.broadcast_leaderboard()
 
     def broadcast_leaderboard(self):
-        """广播排行榜"""
+        ###广播排行榜
         sorted_scores = sorted(
             self.leaderboard.items(),
             key=lambda x: x[1],
