@@ -29,6 +29,14 @@ class Server:
         self.all_sockets.append(self.server)
         #initialize past chat indices
         self.indices={}
+
+
+        ## Game matchmaking
+        self.waiting_players = []  # 等待匹配的玩家列表
+        self.active_games = {}     # {player_socket: game_info}
+        self.leaderboard = {}      # {player_name: score}
+
+
         # sonnet
         # self.sonnet_f = open('AllSonnets.txt.idx', 'rb')
         # self.sonnet = pkl.load(self.sonnet_f)
@@ -98,7 +106,21 @@ class Server:
 # handle connect request
 #==============================================================================
             msg = json.loads(msg)
-            if msg["action"] == "connect":
+                  # 游戏匹配请求
+            if msg["action"] == "find_match":
+                self.handle_find_match(from_sock)
+                return
+            
+            # 游戏移动
+            elif msg["action"] == "game_move":
+                self.handle_game_move(from_sock, msg)
+                return
+            
+            # 提交分数
+            elif msg["action"] == "submit_score":
+                self.handle_submit_score(from_sock, msg)
+                return
+            elif msg["action"] == "connect":
                 to_name = msg["target"]
                 from_name = self.logged_sock2name[from_sock]
                 if to_name == from_name:
@@ -204,8 +226,102 @@ class Server:
                sock, address=self.server.accept()
                self.new_client(sock)
 
+##。
+    def handle_find_match(self, client_socket, data):
+        """处理匹配请求"""
+        player_name = self.logged_sock2name.get(client_socket)
+        
+        if not player_name:
+            return
+        
+        # 如果已经有人在等待，配对成功
+        if self.waiting_players:
+            opponent_socket = self.waiting_players.pop(0)
+            opponent_name = self.logged_sock2name[opponent_socket]
+            
+            # 通知两个玩家匹配成功
+            # 第一个玩家是 X
+            msg1 = json.dumps({
+                "action": "match_found",
+                "opponent": player_name,
+                "your_symbol": "X"
+            })
+            mysend(opponent_socket, msg1)
+            
+            # 第二个玩家是 O
+            msg2 = json.dumps({
+                "action": "match_found",
+                "opponent": opponent_name,
+                "your_symbol": "O"
+            })
+            mysend(client_socket, msg2)
+            
+            # 记录游戏状态
+            self.active_games[opponent_socket] = client_socket
+            self.active_games[client_socket] = opponent_socket
+        else:
+            # 加入等待队列
+            self.waiting_players.append(client_socket)
+
+    def handle_game_move(self, client_socket, data):
+        """处理游戏移动"""
+        if client_socket not in self.active_games:
+            return
+        
+        opponent_socket = self.active_games[client_socket]
+        move = data.get("move")
+        
+        # 转发移动给对手
+        msg = json.dumps({
+            "action": "opponent_move",
+            "move": move
+        })
+        mysend(opponent_socket, msg)
+
+    def handle_submit_score(self, client_socket, data):
+        """处理分数提交"""
+        player = data.get("player")
+        score = data.get("score")
+        
+        # 更新排行榜
+        if player in self.leaderboard:
+            self.leaderboard[player] += score
+        else:
+            self.leaderboard[player] = score
+        
+        # 广播更新的排行榜
+        self.broadcast_leaderboard()
+
+    def broadcast_leaderboard(self):
+        """广播排行榜"""
+        sorted_scores = sorted(
+            self.leaderboard.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )[:10]
+        
+        leaderboard_data = [
+            {"player": name, "score": score}
+            for name, score in sorted_scores
+        ]
+        
+        msg = json.dumps({
+            "action": "leaderboard_update",
+            "data": leaderboard_data
+        })
+        
+        for sock in self.logged_sock2name.keys():
+            try:
+                mysend(sock, msg)
+            except:
+                pass
+
+
+
+
 def main():
     server=Server()
     server.run()
 
-main()
+if __name__ == "__main__":
+    main()
